@@ -32,6 +32,7 @@
     "whatsapp-web.js": { "puppeteer": "$puppeteer" }
   },
   "devDependencies": {
-    "@electric-sql/pglite": "^0.5.8"
+    "@electric-sql/pglite": "^0.5.8",
+    "hugo-bin": "^0.142.0"
   }
 }
