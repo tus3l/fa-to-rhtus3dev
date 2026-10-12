@@ -24,6 +24,42 @@ before(async () => {
 });
 after(async () => { await new Promise(resolve => server.close(resolve)); db.close(); });
 
+test('Render accepts its HTTPS origin behind an internal proxy and rejects other origins', async () => {
+  const keys = ['RENDER', 'RENDER_EXTERNAL_URL', 'TRUST_PROXY', 'NODE_ENV', 'VERCEL'];
+  const previous = Object.fromEntries(keys.map(key => [key, process.env[key]]));
+  let application;
+  let renderServer;
+  try {
+    Object.assign(process.env, { RENDER: 'true', RENDER_EXTERNAL_URL: 'https://tus3dev-test.onrender.com', NODE_ENV: 'production' });
+    delete process.env.TRUST_PROXY;
+    delete process.env.VERCEL;
+    application = createApp({ dbPath: ':memory:', encryptionKey: randomBytes(32) });
+    await application.ready;
+    assert.equal(application.app.get('trust proxy'), 1);
+    renderServer = application.app.listen(0, '127.0.0.1');
+    await new Promise(resolve => renderServer.once('listening', resolve));
+    const endpoint = `http://127.0.0.1:${renderServer.address().port}/api/setup`;
+    const headers = { 'Content-Type': 'application/json', Host: 'internal-service:10000', 'X-Forwarded-Proto': 'https' };
+    for (const origin of ['https://other-site.example', 'http://tus3dev-test.onrender.com', 'https://tus3dev-test.onrender.com.other-site.example', 'null']) {
+      const rejected = await fetch(endpoint, { method: 'POST', headers: { ...headers, Origin: origin }, body: '{}' });
+      assert.equal(rejected.status, 403);
+      assert.equal((await rejected.json()).error, 'مصدر الطلب غير مسموح');
+    }
+    const response = await fetch(endpoint, { method: 'POST', headers: { ...headers, Origin: process.env.RENDER_EXTERNAL_URL }, body: JSON.stringify({ name: 'Render test owner', email: 'render-test@example.com', password: 'test-only-render-password-2026' }) });
+    assert.equal(response.status, 200);
+    assert.ok(response.headers.get('set-cookie').includes('Secure'));
+    assert.ok(response.headers.get('set-cookie').includes('HttpOnly'));
+    assert.ok(response.headers.get('set-cookie').includes('SameSite=Strict'));
+    assert.equal((await response.json()).user.email, 'render-test@example.com');
+  } finally {
+    if (renderServer) await new Promise(resolve => renderServer.close(resolve));
+    await application?.store.close();
+    for (const key of keys) {
+      if (previous[key] === undefined) delete process.env[key]; else process.env[key] = previous[key];
+    }
+  }
+});
+
 test('owner bootstrap, login, and protected CSRF session', async () => {
   const config = await fetch(`${base}/config.js`);
   assert.equal(config.status, 200);

@@ -35,6 +35,9 @@ export function totals(content) {
 }
 
 export function createApp({ dbPath = resolve(root, 'data/tus3dev.sqlite'), encryptionKey, store: suppliedStore } = {}) {
+  const onRender = process.env.RENDER === 'true';
+  const renderUrl = onRender && process.env.RENDER_EXTERNAL_URL ? new URL(process.env.RENDER_EXTERNAL_URL) : null;
+  if (renderUrl && (renderUrl.protocol !== 'https:' || renderUrl.username || renderUrl.password || renderUrl.pathname !== '/' || renderUrl.search || renderUrl.hash)) throw new Error('RENDER_EXTERNAL_URL must be a public HTTPS origin');
   const provider = dbPath === ':memory:' ? 'sqlite' : process.env.DATABASE_PROVIDER || (process.env.DATABASE_URL ? 'supabase' : 'sqlite');
   if (!['sqlite', 'supabase'].includes(provider)) throw new Error('DATABASE_PROVIDER must be sqlite or supabase');
   if (process.env.VERCEL === '1') {
@@ -93,7 +96,7 @@ export function createApp({ dbPath = resolve(root, 'data/tus3dev.sqlite'), encry
   };
   const app = express();
   app.disable('x-powered-by');
-  if (process.env.TRUST_PROXY === '1' || process.env.VERCEL === '1') app.set('trust proxy', 1);
+  if (process.env.TRUST_PROXY === '1' || process.env.VERCEL === '1' || onRender) app.set('trust proxy', 1);
   app.use(helmet({ contentSecurityPolicy: { directives: { defaultSrc: ["'self'"], scriptSrc: ["'self'"], styleSrc: ["'self'", "'unsafe-inline'"], fontSrc: ["'self'", 'data:'], imgSrc: ["'self'", 'data:', 'blob:'], connectSrc: ["'self'", ...(remoteApi ? [remoteApi.origin] : [])], objectSrc: ["'none'"], upgradeInsecureRequests: process.env.NODE_ENV === 'production' ? [] : null } } }));
   app.get('/config.js', (req, res) => res.set('Cache-Control', 'no-store').type('application/javascript').send(`globalThis.TUS3DEV_CONFIG = Object.freeze(${JSON.stringify(config).replaceAll('<', '\\u003c')});`));
   app.use(express.json({ limit: '3mb' }));
@@ -103,7 +106,7 @@ export function createApp({ dbPath = resolve(root, 'data/tus3dev.sqlite'), encry
     res.set('Cache-Control', 'no-store');
     if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method)) {
       const origin = req.get('origin');
-      if (origin && origin !== `${req.protocol}://${req.get('host')}`) return res.status(403).json({ error: 'مصدر الطلب غير مسموح' });
+      if (origin && origin !== `${req.protocol}://${req.get('host')}` && origin !== renderUrl?.origin) return res.status(403).json({ error: 'مصدر الطلب غير مسموح' });
       if (!req.is('application/json')) return res.status(415).json({ error: 'نوع الطلب غير مسموح' });
     }
     const cookie = req.headers.cookie?.split(';').map(part => part.trim()).find(part => part.startsWith('tus_session='))?.slice(12);
