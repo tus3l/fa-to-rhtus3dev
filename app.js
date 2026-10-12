@@ -4,6 +4,7 @@ const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, character =>
 const icon = name => `<i data-lucide="${name === 'cloud-check' ? 'cloud' : name}"></i>`;
 const uid = () => crypto.randomUUID();
 const apiBaseUrl = (globalThis.TUS3DEV_CONFIG?.apiBaseUrl || '/api').replace(/\/+$/, '');
+const staticWithoutApi = Boolean(globalThis.TUS3DEV_CONFIG?.staticHosting && !globalThis.TUS3DEV_CONFIG.backendConfigured);
 const isoDate = () => new Date().toISOString().slice(0, 10);
 const typeInfo = {
   invoice: ['فاتورة مشروع', 'receipt-text'],
@@ -55,6 +56,7 @@ function toast(message, error = false) {
   toast.timer = setTimeout(() => { $('#toast-root').innerHTML = ''; }, 4200);
 }
 async function api(path, options = {}) {
+  if (staticWithoutApi) throw new Error('خادم التطبيق غير متصل');
   let response;
   try { response = await fetch(`${apiBaseUrl}${path}`, { ...options, credentials: 'include', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': state.csrf, ...options.headers }, body: options.body === undefined ? undefined : JSON.stringify(options.body) }); }
   catch { throw new Error('تعذر الاتصال بالخادم. تحقق من الاتصال وحاول مرة أخرى'); }
@@ -105,6 +107,7 @@ document.addEventListener('keydown', event => {
 
 async function authenticate() {
   if (state.user) return true;
+  if (staticWithoutApi) { toast('خادم التطبيق غير متصل', true); return false; }
   const setup = state.setupRequired;
   modal(setup ? 'إنشاء حساب المالك' : 'مرحبًا بعودتك', `<form id="auth-form"><div class="fields">${setup ? field('auth-name', 'الاسم', '', 'text', { required: true, autocomplete: 'name' }) : ''}${field('auth-email', 'البريد الإلكتروني', '', 'email', { required: true, autocomplete: 'username' })}${field('auth-password', 'كلمة المرور', '', 'password', { required: true, minlength: setup ? 12 : 1, maxlength: 128, autocomplete: setup ? 'new-password' : 'current-password', hint: setup ? '12 حرفًا على الأقل' : '' })}</div><p class="modal-error" id="auth-error" role="alert"></p><div class="modal-actions"><button type="button" class="btn" data-close-modal>رجوع</button><button class="btn btn-primary" type="submit">${setup ? 'إنشاء الحساب' : 'تسجيل الدخول'}${icon('arrow-left')}</button></div></form>`);
   return new Promise(resolve => {
@@ -389,7 +392,7 @@ async function generateLink() {
     } catch (error) { if ($('#link-error')) $('#link-error').textContent = error.details?.length ? `${error.message}: ${error.details[0].field}` : error.message; button.disabled = false; }
   };
 }
-function signingUrl() { return state.current?.link ? `${location.origin}/sign/${state.current.link.token}` : ''; }
+function signingUrl() { return state.current?.link ? new URL(`sign/${state.current.link.token}`, document.baseURI).href : ''; }
 async function copyLink() {
   const url = signingUrl();
   if (!url) { toast('لا يوجد رابط نشط لهذا المستند', true); return; }
@@ -695,7 +698,7 @@ function startPolling() {
 
 async function initClient(token) {
   document.body.classList.add('client-mode');
-  $('#app-shell').innerHTML = `<main class="client-shell" id="client-main"><header class="client-topbar"><a class="brand" href="/index.html"><span class="brand-symbol">${icon('command')}</span><span class="brand-word" dir="ltr">TUS3<span>dev</span><span class="brand-dot">.</span></span></a><span>${icon('shield-check')}مستند خاص</span></header><div id="client-content"><div class="skeleton"></div><div class="skeleton large"></div></div></main>`;
+  $('#app-shell').innerHTML = `<main class="client-shell" id="client-main"><header class="client-topbar"><a class="brand" href="index.html"><span class="brand-symbol">${icon('command')}</span><span class="brand-word" dir="ltr">TUS3<span>dev</span><span class="brand-dot">.</span></span></a><span>${icon('shield-check')}مستند خاص</span></header><div id="client-content"><div class="skeleton"></div><div class="skeleton large"></div></div></main>`;
   document.title = 'TUS3dev | مراجعة واعتماد المستند';
   refreshIcons();
   try { state.current = await api(`/sign/${encodeURIComponent(token)}`); renderClientSigning(token); }
@@ -767,7 +770,7 @@ function renderClientSigning(token) {
 async function init() {
   if (globalThis.TUS3DEV_IMAGE_RENDER) return;
   try { if (localStorage.getItem('tus-theme') === 'dark') { document.body.classList.add('dark'); $('#theme-button').innerHTML = icon('sun'); } } catch {}
-  const token = location.pathname.match(/^\/sign\/([\w-]+)$/)?.[1];
+  const token = location.pathname.match(/\/sign\/([\w-]+)$/)?.[1];
   if (token) { await initClient(token); return; }
   const mobileAccount = document.createElement('button');
   mobileAccount.className = 'icon-button mobile-only';
@@ -783,13 +786,20 @@ async function init() {
   };
   $('#today').textContent = dateLabel(new Date().toISOString()); $('#year').textContent = new Date().getFullYear();
   refreshIcons();
-  try {
+  if (staticWithoutApi) {
+    state.view = 'dashboard';
+    updateAccount();
+    await route();
+    $('.connection').innerHTML = `<span></span>غير متصل بالخادم${icon('cloud-off')}`;
+    $('#main').insertAdjacentHTML('afterbegin', `<div class="readonly-banner" id="backend-status" role="status">${icon('cloud-off')}خادم التطبيق غير متصل</div>`);
+    refreshIcons();
+  } else try {
     const session = await api('/session');
     Object.assign(state, session);
     if (state.user) { await loadOwnerData(); startPolling(); }
     updateAccount(); await route();
   } catch (error) {
-    renderDashboard(); toast(`${error.message}. شغّل الخادم باستخدام npm start`, true);
+    renderDashboard(); toast(globalThis.TUS3DEV_CONFIG?.staticHosting ? error.message : `${error.message}. شغّل الخادم باستخدام npm start`, true);
   }
   globalThis.addEventListener('hashchange', route);
   globalThis.addEventListener('beforeunload', event => { if (state.dirty || state.inFlight) { event.preventDefault(); event.returnValue = ''; } });

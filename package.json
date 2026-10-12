@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "build": "node scripts/build-pages.js",
     "start": "node --env-file-if-exists=.env server.js",
     "test": "node --test tests/*.test.js",
     "check": "node --check server.js && node --check app.js && node --check database/store.js && node --check whatsapp.js && node --check invoice-image.js"
@@ -32,7 +33,6 @@
     "whatsapp-web.js": { "puppeteer": "$puppeteer" }
   },
   "devDependencies": {
-    "@electric-sql/pglite": "^0.5.8",
-    "hugo-bin": "^0.142.0"
+    "@electric-sql/pglite": "^0.5.8"
   }
 }
