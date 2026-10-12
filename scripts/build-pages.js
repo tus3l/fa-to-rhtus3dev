@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
-export async function buildPages({ directory = resolve(root, 'dist'), basePath = '/fa-to-rhtus3dev/', apiBaseUrl = '' } = {}) {
+export async function buildPages({ directory = resolve(root, 'dist'), basePath = '/fa-to-rhtus3dev/', apiBaseUrl = '', staticHosting = true } = {}) {
   if (!/^\/(?:[A-Za-z0-9_.-]+\/)*$/.test(basePath)) throw new Error('Use a base path such as /repository/ or /');
   if (apiBaseUrl) {
     const url = new URL(apiBaseUrl);
@@ -16,7 +16,7 @@ export async function buildPages({ directory = resolve(root, 'dist'), basePath =
   const html = (await readFile(resolve(root, 'index.html'), 'utf8')).replace('<base href="/">', `<base href="${basePath}">`);
   await writeFile(resolve(directory, 'index.html'), html);
   await writeFile(resolve(directory, '404.html'), html);
-  const config = { apiBaseUrl: apiBaseUrl || '/api', staticHosting: true, backendConfigured: Boolean(apiBaseUrl) };
+  const config = { apiBaseUrl: apiBaseUrl || '/api', staticHosting, backendConfigured: !staticHosting || Boolean(apiBaseUrl) };
   await writeFile(resolve(directory, 'config.js'), `globalThis.TUS3DEV_CONFIG = Object.freeze(${JSON.stringify(config).replaceAll('<', '\\u003c')});\n`);
   await writeFile(resolve(directory, '.nojekyll'), '');
   const vendors = [

@@ -8,8 +8,6 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import sharp from 'sharp';
-import { createWhatsappService } from './whatsapp.js';
-import { createInvoiceRenderer } from './invoice-image.js';
 
 const root = dirname(fileURLToPath(import.meta.url));
 const now = () => new Date().toISOString();
@@ -26,6 +24,8 @@ const itemSchema = z.object({ id: text(80), name: text(), description: text(2000
 const paymentSchema = z.object({ id: text(80), name: text(), bank: text().default(''), method: z.enum(['bank', 'stc', 'apple', 'cash', 'card', 'other']), date: optionalDate.default(''), amount: money, percentage: z.coerce.number().min(0).max(100), status: z.enum(['paid', 'unpaid', 'partial']), paidAmount: money.default(0), reference: text().default(''), note: text(2000).default('') }).refine(payment => payment.paidAmount <= payment.amount, { message: 'المبلغ المدفوع أكبر من الدفعة' });
 const documentSchema = z.object({ type: z.enum(types), title: text(), date, dueDate: optionalDate.default(''), description: text(4000).default(''), notes: text(4000).default(''), provider: partySchema, client: partySchema, items: z.array(itemSchema).max(500), payments: z.array(paymentSchema).max(100), bank: bankSchema.nullable().default(null), declaration: text(12000), currency: z.enum(['SAR', 'USD', 'AED', 'EUR']).default('SAR'), logo: z.string().max(1500000).refine(value => !value || /^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(value)).default(''), accent: z.string().regex(/^#[0-9a-fA-F]{6}$/).default('#27885c') });
 const settingsSchema = z.object({ provider: partySchema, banks: z.array(bankSchema).max(30), logo: documentSchema.shape.logo, accent: documentSchema.shape.accent, declarations: z.record(text(12000)).default({}), numberPrefix: z.string().regex(/^[A-Z0-9-]{1,12}$/).default('TUS') });
+const apiLimiter = rateLimit({ windowMs: 60_000, limit: 180, standardHeaders: 'draft-8', legacyHeaders: false, message: { error: 'طلبات كثيرة، حاول بعد قليل' } });
+const authLimiter = rateLimit({ windowMs: 15 * 60_000, limit: 15, standardHeaders: 'draft-8', legacyHeaders: false, message: { error: 'محاولات كثيرة، حاول لاحقًا' } });
 
 export function totals(content) {
   const round = value => Math.round((value + Number.EPSILON) * 100) / 100;
@@ -34,9 +34,13 @@ export function totals(content) {
   return { total, paid, remaining: round(total - paid), percentage: total ? round(paid / total * 100) : 0 };
 }
 
-export function createApp({ dbPath = resolve(root, 'data/tus3dev.sqlite'), encryptionKey, store: suppliedStore, whatsapp = null } = {}) {
+export function createApp({ dbPath = resolve(root, 'data/tus3dev.sqlite'), encryptionKey, store: suppliedStore } = {}) {
   const provider = dbPath === ':memory:' ? 'sqlite' : process.env.DATABASE_PROVIDER || (process.env.DATABASE_URL ? 'supabase' : 'sqlite');
   if (!['sqlite', 'supabase'].includes(provider)) throw new Error('DATABASE_PROVIDER must be sqlite or supabase');
+  if (process.env.VERCEL === '1') {
+    if (provider !== 'supabase' || !process.env.DATABASE_URL) throw new Error('Vercel requires an external PostgreSQL database');
+    if (!/^[a-fA-F0-9]{64}$/.test(process.env.LINK_ENCRYPTION_KEY || '')) throw new Error('Vercel requires a stable LINK_ENCRYPTION_KEY');
+  }
   const store = suppliedStore || (provider === 'supabase'
     ? createPostgresStore({ connectionString: process.env.DATABASE_URL, ca: process.env.DATABASE_CA_CERT_PATH ? readFileSync(process.env.DATABASE_CA_CERT_PATH, 'utf8') : undefined })
     : createSqliteStore(dbPath));
@@ -89,12 +93,11 @@ export function createApp({ dbPath = resolve(root, 'data/tus3dev.sqlite'), encry
   };
   const app = express();
   app.disable('x-powered-by');
-  if (process.env.TRUST_PROXY === '1') app.set('trust proxy', 1);
+  if (process.env.TRUST_PROXY === '1' || process.env.VERCEL === '1') app.set('trust proxy', 1);
   app.use(helmet({ contentSecurityPolicy: { directives: { defaultSrc: ["'self'"], scriptSrc: ["'self'"], styleSrc: ["'self'", "'unsafe-inline'"], fontSrc: ["'self'", 'data:'], imgSrc: ["'self'", 'data:', 'blob:'], connectSrc: ["'self'", ...(remoteApi ? [remoteApi.origin] : [])], objectSrc: ["'none'"], upgradeInsecureRequests: process.env.NODE_ENV === 'production' ? [] : null } } }));
   app.get('/config.js', (req, res) => res.set('Cache-Control', 'no-store').type('application/javascript').send(`globalThis.TUS3DEV_CONFIG = Object.freeze(${JSON.stringify(config).replaceAll('<', '\\u003c')});`));
   app.use(express.json({ limit: '3mb' }));
-  app.use('/api', rateLimit({ windowMs: 60_000, limit: 180, standardHeaders: 'draft-8', legacyHeaders: false, message: { error: 'طلبات كثيرة، حاول بعد قليل' } }));
-  const authLimiter = rateLimit({ windowMs: 15 * 60_000, limit: 15, standardHeaders: 'draft-8', legacyHeaders: false, message: { error: 'محاولات كثيرة، حاول لاحقًا' } });
+  app.use('/api', apiLimiter);
   app.use('/api', async (req, res, next) => {
     await readiness;
     res.set('Cache-Control', 'no-store');
@@ -125,6 +128,7 @@ export function createApp({ dbPath = resolve(root, 'data/tus3dev.sqlite'), encry
   };
   app.get('/api/session', async (req, res) => res.json({ user: req.user || null, csrf: req.session?.csrf || '', setupRequired: !await get('SELECT id FROM users LIMIT 1') }));
   app.post('/api/setup', authLimiter, async (req, res) => {
+    if (process.env.VERCEL === '1') fail(403, 'أنشئ حساب المالك من التشغيل المحلي على قاعدة البيانات نفسها قبل النشر العام');
     const input = z.object({ name: text().min(2), email: z.string().email().max(200), password: z.string().min(12).max(128) }).parse(req.body);
     const user = await transaction(async () => {
       if (await get('SELECT id FROM users LIMIT 1')) fail(403, 'تم إعداد حساب المالك مسبقًا');
@@ -143,17 +147,6 @@ export function createApp({ dbPath = resolve(root, 'data/tus3dev.sqlite'), encry
     await sessionResponse(res, user);
   });
   app.post('/api/logout', requireOwner, async (req, res) => { await run('DELETE FROM sessions WHERE token_hash=?', req.session.token_hash); res.clearCookie('tus_session'); res.json({ ok: true }); });
-  const requireWhatsapp = () => whatsapp || fail(503, 'خدمة واتساب غير متاحة في هذا التشغيل');
-  app.get('/api/whatsapp', requireOwner, async (req, res) => res.json(await requireWhatsapp().status()));
-  app.post('/api/whatsapp/connect', requireOwner, async (req, res) => res.json(await requireWhatsapp().connect()));
-  app.post('/api/whatsapp/disconnect', requireOwner, async (req, res) => res.json(await requireWhatsapp().disconnect()));
-  app.post('/api/whatsapp/messages/:id/retry', requireOwner, async (req, res) => {
-    const input = z.object({ phone: text(40).optional() }).parse(req.body);
-    await ownerDoc(req, req.params.id);
-    try { await requireWhatsapp().retry(req.params.id, input.phone); }
-    catch (error) { if (error.status) throw error; fail(400, error.message); }
-    res.json(await requireWhatsapp().status());
-  });
   app.get('/api/settings', requireOwner, async (req, res) => res.json(JSON.parse((await get('SELECT data FROM settings WHERE user_id=?', req.user.id))?.data || JSON.stringify({ provider: { name: req.user.name, email: req.user.email, company: '', phone: '', website: '', taxId: '', notes: '' }, banks: [], logo: '', accent: '#27885c', declarations: {}, numberPrefix: 'TUS' }))));
   app.put('/api/settings', requireOwner, async (req, res) => {
     const input = settingsSchema.parse(req.body);
@@ -315,10 +308,6 @@ export function createApp({ dbPath = resolve(root, 'data/tus3dev.sqlite'), encry
       await event(doc.id, 'approved', { contentHash: digest });
       return await get('SELECT * FROM documents WHERE id=?', doc.id);
     });
-    if (whatsapp) {
-      try { await whatsapp.enqueue(doc.id, await publicPayload(doc)); }
-      catch { console.error('WhatsApp queue failed for approved document:', doc.id); }
-    }
     res.json(await publicPayload(doc));
   });
   app.post('/api/sign/:token/reject', async (req, res) => {
@@ -349,24 +338,43 @@ export function createApp({ dbPath = resolve(root, 'data/tus3dev.sqlite'), encry
   return { app, db: store.raw, store, ready: readiness };
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+export function createPublicHandler({ environment = process.env, applicationFactory = () => createApp() } = {}) {
+  let applicationPromise;
+  const handler = express();
+  handler.disable('x-powered-by');
+  handler.use(async (req, res) => {
+    if (!environment.DATABASE_URL || !/^[a-fA-F0-9]{64}$/.test(environment.LINK_ENCRYPTION_KEY || '') || environment.DATABASE_PROVIDER === 'sqlite') {
+      return res.status(503).set('Cache-Control', 'no-store').json({ error: 'الخادم العام يحتاج إعداد DATABASE_URL و LINK_ENCRYPTION_KEY من لوحة الاستضافة' });
+    }
+    try {
+      applicationPromise ||= (async () => {
+        const application = applicationFactory();
+        try { await application.ready; return application; }
+        catch (error) { await application.store.close(); throw error; }
+      })();
+      const { app } = await applicationPromise;
+      return app(req, res);
+    } catch {
+      applicationPromise = null;
+      return res.status(503).set('Cache-Control', 'no-store').json({ error: 'تعذر اتصال الخادم بقاعدة البيانات، راجع إعدادات الاستضافة' });
+    }
+  });
+  return handler;
+}
+
+export default createPublicHandler();
+
+if (process.env.VERCEL !== '1' && process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
-    let origin;
-    const renderer = createInvoiceRenderer({ origin: () => origin });
-    const whatsapp = createWhatsappService({ directory: resolve(root, 'data/whatsapp'), renderImage: document => renderer.render(document) });
-    const { app, store, ready } = createApp({ whatsapp });
+    const { app, store, ready } = createApp();
     await ready;
     const port = Number(process.env.PORT || 3000);
     const host = process.env.HOST || '127.0.0.1';
-    const server = app.listen(port, host, async () => {
-      const localHost = ['0.0.0.0', '::'].includes(host) ? '127.0.0.1' : host.includes(':') ? `[${host}]` : host;
-      origin = `http://${localHost}:${server.address().port}`;
+    const server = app.listen(port, host, () => {
       console.log(`TUS3dev ready at http://localhost:${server.address().port}/index.html (${store.dialect})`);
-      await whatsapp.resume();
     });
     server.on('error', () => { console.error('Unable to listen on the configured port'); process.exitCode = 1; });
     for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, async () => {
-      await whatsapp.close(); await renderer.close();
       server.close(async () => { await store.close(); process.exit(0); });
     });
   } catch (error) {

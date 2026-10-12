@@ -29,7 +29,6 @@ const state = { user: null, csrf: '', setupRequired: false, settings: emptySetti
 let modalResolver = null;
 let modalPreviousFocus = null;
 let signatureObserver = null;
-let whatsappPoll = null;
 
 function refreshIcons(parent = document) {
   if (globalThis.lucide) lucide.createIcons({ attrs: { 'aria-hidden': 'true' } });
@@ -481,8 +480,6 @@ function settingsBanks() {
 function renderSettings() {
   const settings = state.settings;
   $('#main').innerHTML = `<div class="page-enter settings-layout">${pageTitle('الإعدادات', 'هويتك المهنية، كما تحب أن تظهر.', false)}<form id="settings-form">${section(1, 'الحساب وبيانات التواصل', `${partyFields(settings.provider, 'provider', true)}<p class="export-note">بريد تسجيل الدخول: ${escapeHtml(state.user.email)}</p>`)}${section(2, 'هوية المستند', `<div class="fields">${field('accent', 'لون الهوية', settings.accent, 'color')}${field('numberPrefix', 'بادئة رقم المستند', settings.numberPrefix, 'text', { pattern: '[A-Z0-9-]{1,12}', maxlength: 12, dir: 'ltr' })}${field('logo-file', 'شعار العلامة التجارية', '', 'file', { full: true, accept: 'image/png,image/jpeg,image/webp', hint: 'PNG / JPG / WebP · حتى 1 MB' })}${settings.logo ? `<div class="field full"><img src="${escapeHtml(settings.logo)}" alt="شعار العلامة التجارية" style="max-width:130px;max-height:70px;object-fit:contain"><button type="button" class="btn btn-text btn-small" id="remove-logo">إزالة الشعار</button></div>` : ''}</div>`)}${section(3, 'الحسابات البنكية', `<div id="settings-banks">${settingsBanks()}</div><button type="button" class="btn btn-small" data-action="add-bank">${icon('plus')}إضافة حساب بنكي</button>`)}${section(4, 'نصوص الإقرار الافتراضية', `<div class="fields">${Object.entries(typeInfo).map(([key, info]) => field(`declarations.${key}`, info[0], settings.declarations[key] || defaultDeclaration(key), 'textarea', { full: true, maxlength: 12000 })).join('')}</div>`)}<div class="form-actions"><a class="btn" href="#dashboard">رجوع</a><button class="btn btn-primary" type="submit">${icon('save')}حفظ الإعدادات</button></div><p class="modal-error" id="settings-error" role="alert"></p></form></div>`;
-  $('#settings-form').insertAdjacentHTML('beforebegin', `<section class="whatsapp-section"><div class="form-section-heading">${icon('message-circle')}<h2>واتساب</h2></div><div id="whatsapp-status" aria-live="polite">جاري تحميل حالة الاتصال...</div><div id="whatsapp-qr"></div><div class="button-row"><button class="btn btn-primary" type="button" id="whatsapp-connect">${icon('qr-code')}ربط واتساب</button><button class="btn" type="button" id="whatsapp-disconnect" hidden>${icon('unplug')}فصل الحساب</button></div><div class="modal-error" id="whatsapp-error" role="alert"></div><div id="whatsapp-messages"></div></section>`);
-  initWhatsapp();
   $('#settings-form').oninput = event => {
     if (!event.target.name || event.target.type === 'file') return;
     setPath(settings, event.target.name, event.target.value);
@@ -509,49 +506,6 @@ function renderSettings() {
     finally { button.disabled = false; }
   };
   refreshIcons();
-}
-
-function renderWhatsapp(data) {
-  if (!$('#whatsapp-status')) return;
-  const labels = { disconnected: 'غير متصل', connecting: 'جاري الاتصال...', qr: 'امسح الرمز من واتساب > الأجهزة المرتبطة > ربط جهاز', connected: 'متصل', error: 'تعذر الاتصال' };
-  $('#whatsapp-status').innerHTML = `<span class="whatsapp-state ${data.status === 'connected' ? 'connected' : ''}">${icon(data.status === 'connected' ? 'circle-check' : 'circle-dot')}${escapeHtml(labels[data.status] || data.status)}${data.phone ? ` <b dir="ltr">+${escapeHtml(data.phone)}</b>` : ''}</span>`;
-  $('#whatsapp-qr').innerHTML = data.qr ? `<img src="${escapeHtml(data.qr)}" width="280" height="280" alt="رمز ربط حساب واتساب">` : '';
-  $('#whatsapp-connect').hidden = ['connected', 'connecting', 'qr'].includes(data.status);
-  $('#whatsapp-disconnect').hidden = data.status === 'disconnected';
-  $('#whatsapp-error').textContent = data.error || '';
-  const statuses = { pending: 'بانتظار الإرسال', sending: 'جاري الإرسال', sent: 'تم الإرسال', failed: 'تعذر الإرسال', uncertain: 'تحقق من المحادثة' };
-  $('#whatsapp-messages').innerHTML = data.jobs.length ? `<h3>رسائل الاعتماد</h3>${data.jobs.map(job => `<div class="whatsapp-job"><div><strong>${escapeHtml(job.clientName)}</strong><span dir="ltr">${escapeHtml(job.number)}</span><small>${escapeHtml(statuses[job.status])}${job.error ? `: ${escapeHtml(job.error)}` : ''}</small></div>${['failed', 'uncertain'].includes(job.status) ? `<button class="icon-button" type="button" data-whatsapp-retry="${escapeHtml(job.id)}" title="إعادة الإرسال" aria-label="إعادة الإرسال">${icon('send')}</button>` : icon(job.status === 'sent' ? 'check-check' : 'clock')}</div>`).join('')}` : '';
-  $$('[data-whatsapp-retry]').forEach(button => { button.onclick = () => {
-    const job = data.jobs.find(entry => entry.id === button.dataset.whatsappRetry);
-    modal('إعادة إرسال الفاتورة', `${job.status === 'uncertain' ? '<p>قد تكون الرسالة وصلت بالفعل. تحقق من محادثة العميل قبل إعادة الإرسال.</p>' : ''}${field('whatsapp-phone', 'رقم واتساب العميل', job.phone ? `+${job.phone}` : '', 'tel', { dir: 'ltr', maxlength: 40 })}<div id="whatsapp-retry-error" class="modal-error" role="alert"></div>`, `<button class="btn" data-close-modal>رجوع</button><button class="btn btn-primary" id="whatsapp-retry-send">${icon('send')}إرسال</button>`);
-    $('#whatsapp-retry-send').onclick = async event => {
-      event.currentTarget.disabled = true;
-      try { renderWhatsapp(await api(`/whatsapp/messages/${job.id}/retry`, { method: 'POST', body: { phone: $('[name=whatsapp-phone]').value } })); closeModal(); toast('تمت إضافة الفاتورة لطابور الإرسال'); }
-      catch (error) { $('#whatsapp-retry-error').textContent = error.message; if ($('#whatsapp-retry-send')) $('#whatsapp-retry-send').disabled = false; }
-    };
-  }; });
-  refreshIcons();
-}
-function initWhatsapp() {
-  clearInterval(whatsappPoll);
-  const update = async () => {
-    if (state.view !== 'settings' || !$('#whatsapp-status')) { clearInterval(whatsappPoll); return; }
-    try { renderWhatsapp(await api('/whatsapp')); }
-    catch (error) { if ($('#whatsapp-error')) $('#whatsapp-error').textContent = error.message; }
-  };
-  $('#whatsapp-connect').onclick = async event => {
-    event.currentTarget.disabled = true;
-    try { renderWhatsapp(await api('/whatsapp/connect', { method: 'POST', body: {} })); }
-    catch (error) { $('#whatsapp-error').textContent = error.message; }
-    finally { if ($('#whatsapp-connect')) $('#whatsapp-connect').disabled = false; }
-  };
-  $('#whatsapp-disconnect').onclick = async () => {
-    if (!await confirmDialog('فصل واتساب', 'سيتوقف الإرسال حتى تعيد ربط الحساب. الرسائل المنتظرة ستبقى محفوظة.', 'فصل الحساب', true)) return;
-    try { renderWhatsapp(await api('/whatsapp/disconnect', { method: 'POST', body: {} })); }
-    catch (error) { if ($('#whatsapp-error')) $('#whatsapp-error').textContent = error.message; }
-  };
-  void update();
-  whatsappPoll = setInterval(update, 3000);
 }
 
 async function route() {

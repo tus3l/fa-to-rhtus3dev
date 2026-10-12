@@ -8,3 +8,5 @@ data/
 *.log
 test-results/
 dist/
+public/
+.vercel/

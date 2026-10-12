@@ -9,12 +9,6 @@ let db;
 let base;
 let cookie = '';
 let csrf = '';
-const whatsappJobs = [];
-const whatsapp = {
-  status: async () => ({ status: 'disconnected', qr: null, jobs: [] }),
-  connect: async () => ({ status: 'connecting', qr: null, jobs: [] }),
-  enqueue: async (id, document) => { whatsappJobs.push({ id, document }); }
-};
 const party = { name: 'Test owner', company: '', phone: '', email: '', website: '', taxId: '', notes: '' };
 const content = () => ({ type: 'invoice', title: 'Test invoice', date: '2026-10-11', dueDate: '', provider: { ...party }, client: { ...party, name: 'Test client' }, description: '', notes: '', items: [{ id: 'item-1', name: 'Development', description: '', quantity: 2, price: 100, discount: 10 }], payments: [{ id: 'payment-1', name: 'First payment', bank: '', method: 'bank', date: '', amount: 95, percentage: 50, status: 'paid', paidAmount: 0, reference: '', note: '' }], bank: null, declaration: 'I reviewed and accept this document.', currency: 'SAR', logo: '', accent: '#28765a' });
 async function request(path, method = 'GET', body, options = {}) {
@@ -22,7 +16,7 @@ async function request(path, method = 'GET', body, options = {}) {
   return { response, data: await response.json() };
 }
 before(async () => {
-  const application = createApp({ dbPath: ':memory:', encryptionKey: randomBytes(32), whatsapp });
+  const application = createApp({ dbPath: ':memory:', encryptionKey: randomBytes(32) });
   db = application.db;
   server = application.app.listen(0, '127.0.0.1');
   await new Promise(resolve => server.once('listening', resolve));
@@ -36,7 +30,7 @@ test('owner bootstrap, login, and protected CSRF session', async () => {
   assert.ok((await config.text()).includes('"apiBaseUrl":"/api"'));
   assert.equal(config.headers.get('cache-control'), 'no-store');
   assert.equal((await request('/documents', 'GET', undefined, { public: true })).response.status, 401);
-  assert.equal((await request('/whatsapp', 'GET', undefined, { public: true })).response.status, 401);
+  assert.equal((await request('/whatsapp', 'GET', undefined, { public: true })).response.status, 404);
   const setup = await request('/setup', 'POST', { name: 'Test owner', email: 'test@example.com', password: 'test-only-password-2026' });
   assert.equal(setup.response.status, 200);
   cookie = setup.response.headers.get('set-cookie').split(';')[0];
@@ -45,8 +39,7 @@ test('owner bootstrap, login, and protected CSRF session', async () => {
   assert.ok(setup.response.headers.get('set-cookie').includes('SameSite=Strict'));
   assert.equal((await request('/setup', 'POST', { name: 'Other', email: 'other@example.com', password: 'test-only-password-2026' })).response.status, 403);
   assert.equal((await request('/documents', 'POST', content(), { headers: { 'X-CSRF-Token': '' } })).response.status, 403);
-  assert.equal((await request('/whatsapp/connect', 'POST', {}, { headers: { 'X-CSRF-Token': '' } })).response.status, 403);
-  assert.equal((await request('/whatsapp/connect', 'POST', {})).data.status, 'connecting');
+  assert.equal((await request('/whatsapp/connect', 'POST', {})).response.status, 404);
   assert.equal((await request('/documents', 'POST', content(), { headers: { Origin: 'https://evil.example' } })).response.status, 403);
   const user = db.prepare('SELECT * FROM users LIMIT 1').get();
   assert.notEqual(user.password_hash, 'test-only-password-2026');
@@ -112,10 +105,6 @@ test('approval records snapshot, audit, signature, and creates independent revis
   assert.equal(signed.response.status, 200);
   assert.equal(signed.data.status, 'Approved');
   assert.ok(signed.data.approved_at);
-  assert.equal(whatsappJobs.length, 1);
-  assert.equal(whatsappJobs[0].id, created.id);
-  assert.equal(whatsappJobs[0].document.status, 'Approved');
-  assert.equal(whatsappJobs[0].document.signature.image, signed.data.signature.image);
   assert.equal(signed.data.signature.content_hash.length, 64);
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM document_revisions WHERE document_id=?').get(created.id).count, 1);
   const owner = (await request(`/documents/${created.id}`)).data;
@@ -124,7 +113,6 @@ test('approval records snapshot, audit, signature, and creates independent revis
   assert.equal((await request(`/documents/${created.id}`, 'PUT', { content: content(), version: 1 })).response.status, 409);
   assert.equal((await request(`/documents/${created.id}/action`, 'POST', { action: 'cancel' })).response.status, 409);
   assert.equal((await request(`/sign/${link.token}`, 'POST', { accepted: true, signature, signerName: 'Test client' }, { public: true })).response.status, 409);
-  assert.equal(whatsappJobs.length, 1);
   const revision = await request(`/documents/${created.id}/revision`, 'POST', {});
   assert.equal(revision.response.status, 201);
   assert.equal(revision.data.number, created.number);
